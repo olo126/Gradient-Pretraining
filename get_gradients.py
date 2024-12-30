@@ -19,6 +19,16 @@ def combine_data(entry):
     entry['problem'] = entry['problem'] + "\n" + entry['solution']
   return entry
 
+def attach_eval_prompt(entry, prompt_ex):
+  if 'question' in entry.keys():
+    input_text = prompt_ex + "\n\n" + f"Question: {entry['question'].strip()}\nAnswer: "
+  elif 'problem' in entry.keys():
+    input_text = prompt_ex + "\n\n" + f"Question: {entry['problem'].strip()}\nAnswer: "
+  return input_text
+
+def append_prompt(entry, prompt):
+  return prompt + "/n/n" + entry
+
 def tokenize(entry, tokenizer):
   outputs = tokenizer(
     entry["text"],
@@ -86,6 +96,14 @@ def obtain_gradients_with_adam(model, batch, avg, avg_sq):
 
   return vectorized_grads
 
+def obtain_gradients(model, batch):
+    """ obtain gradients. """
+    loss = model(**batch).loss
+    loss.backward()
+    vectorized_grads = torch.cat(
+        [p.grad.view(-1) for p in model.parameters() if p.grad is not None])
+    return vectorized_grads
+
 def merge_and_normalize_info(output_dir: str, prefix="reps"):
   """ Merge and normalize the representations and gradients into a single file. """
   info = os.listdir(output_dir)
@@ -120,14 +138,25 @@ def merge_info(output_dir: str, prefix="reps"):
   torch.save(merged_data, output_file)
   print(f"Saving the unnormalized {prefix} (Shape: {merged_data.shape}) to {output_file}.")
 
+def encode(example, tokenizer):
+  print(example)
+  tokenized = tokenizer(example["text"], padding=True, truncation=True, max_length = 3000, return_tensors='pt')
+  input_ids = tokenized.input_ids
+  print(input_ids)
+  print(input_ids.shape)
+  labels = input_ids.clone()[1:]
+  return {
+    'input_ids': input_ids.flatten(),
+    'labels': labels.flatten(),
+  }
+
 def main(args):
   set_seed(2)
 
   tokenizer = AutoTokenizer.from_pretrained(args.model_path)
-  model = load_model(args.model_path, tokenizer, torch.bfloat16)
-
   if tokenizer.pad_token is None:
     tokenizer.add_special_tokens({"pad_token": "<pad>"})
+  model = load_model(args.model_path, tokenizer, torch.bfloat16)
   
   if args.initialize_lora:
     assert not isinstance(model, PeftModel)
@@ -149,30 +178,101 @@ def main(args):
     optimizer_path = os.path.join(args.model_path, "optimizer.pt")
     adam_optimizer_state = torch.load(optimizer_path, map_location="cpu")["state"]
   
-  gsm8k_train = load_dataset("openai/gsm8k", "main", split="train", cache_dir="/gscratch/xlab/olo126/.cache").shuffle(seed=2)
-  gsm8k_train = gsm8k_train.map(combine_data)
-  gsm8k_train = gsm8k_train.rename_column("question", "text")
-  gsm8k_train = gsm8k_train.remove_columns("answer")
-  print("gsm8k done")
+  if args.gradient_type == "adam":
+    """
+    gsm8k_train = load_dataset("openai/gsm8k", "main", split="train", cache_dir="/gscratch/xlab/olo126/.cache").shuffle(seed=2)
+    gsm8k_train = gsm8k_train.map(combine_data)
+    gsm8k_train = gsm8k_train.rename_column("question", "text")
+    gsm8k_train = gsm8k_train.remove_columns("answer")
+    print("gsm8k done")
 
-  math_train = load_dataset("hendrycks/competition_math", split="train", cache_dir="/gscratch/xlab/olo126/.cache", trust_remote_code=True).shuffle(seed=2)
-  math_train = math_train.map(combine_data)
-  math_train = math_train.rename_column("problem", "text")
-  math_train = math_train.remove_columns(["solution", "level", "type"])
-  print("MATH done")
+    math_train = load_dataset("hendrycks/competition_math", split="train", cache_dir="/gscratch/xlab/olo126/.cache", trust_remote_code=True).shuffle(seed=2)
+    math_train = math_train.map(combine_data)
+    math_train = math_train.rename_column("problem", "text")
+    math_train = math_train.remove_columns(["solution", "level", "type"])
+    print("MATH done")
+    """
 
-  owm_train = load_dataset("open-web-math/open-web-math", split="train", cache_dir="/gscratch/xlab/olo126/.cache").shuffle(seed=2)
-  #owm_train = owm_train.filter(lambda example, idx: idx < len(owm_train) // 10, with_indices=True).remove_columns(["url", "date", "metadata"])
-  print("OpenWebMath done")
+    owm_train = load_dataset("open-web-math/open-web-math", split="train", cache_dir="/gscratch/xlab/olo126/.cache").shuffle(seed=2)
+    #owm_train = owm_train.filter(lambda example, idx: idx < len(owm_train) // 10, with_indices=True).remove_columns(["url", "date", "metadata"])
+    print("OpenWebMath done")
 
-  sub_gsm8k = gsm8k_train.select(range(len(gsm8k_train) // 10, len(gsm8k_train)))
-  sub_math = math_train.select(range(len(math_train) // 10, len(math_train)))
-  sub_owm = owm_train.select(range(len(owm_train) // 1000, len(owm_train) // 1000 + len(owm_train) // 20))
-  pretrain_dataset = concatenate_datasets([sub_gsm8k, sub_math, sub_owm]).map(tokenize, batched=True, fn_kwargs={'tokenizer': tokenizer}).shuffle(seed=2)
+    # leave last 10% of gsm8k and competition math for validation
+    #sub_gsm8k = gsm8k_train.select(range(len(gsm8k_train) // 10, 9 * len(gsm8k_train) // 10))
+    #sub_math = math_train.select(range(len(math_train) // 10, 9* len(math_train) // 10))
+    sub_owm = owm_train.select(range(len(owm_train) // 1000, len(owm_train) // 1000 + len(owm_train) // 20)).shuffle(seed=2)
+    #raw_dataset = concatenate_datasets([sub_gsm8k, sub_math, sub_owm]).map(tokenize, batched=True, fn_kwargs={'tokenizer': tokenizer}).shuffle(seed=2)
+    #raw_dataset = concatenate_datasets([sub_gsm8k, sub_math, sub_owm]).shuffle(seed=2)
+    raw_dataset = sub_owm
 
-  print(pretrain_dataset[0])
-  data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
-  dataloader = DataLoader(pretrain_dataset, batch_size=1, collate_fn=data_collator)
+    print(raw_dataset[0])
+  
+    print(raw_dataset)
+    pretrain_dataset = raw_dataset.map(encode, batched=False, fn_kwargs={'tokenizer': tokenizer})
+    print(pretrain_dataset)
+    columns = deepcopy(pretrain_dataset.column_names)
+    columns.remove("input_ids")
+    columns.remove("labels")
+    pretrain_dataset = pretrain_dataset.remove_columns(columns)
+    data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
+    dataloader = DataLoader(pretrain_dataset, batch_size=1, collate_fn=data_collator)
+
+  elif args.gradient_type == "sgd":
+    print("in SGD")
+    if args.eval_task == "gsm8k":
+      print("in gsm8k eval")
+      gsm8k_train = load_dataset("openai/gsm8k", "main", split="train", cache_dir="/gscratch/xlab/olo126/.cache").shuffle(seed=2)
+      
+      # grab first three of validation set to use for few-shot prompting
+      # few_shot = gsm8k_train.select(range(len(gsm8k_train) // 10, len(gsm8k_train) // 10 + 3))
+      # eval_raw = gsm8k_train.select(range(len(gsm8k_train) // 10 + 3, len(gsm8k_train)))
+      eval_raw = gsm8k_train.select(range(len(gsm8k_train) // 10, len(gsm8k_train)))
+      eval_raw = eval_raw.map(combine_data).rename_column("question", "text").remove_columns("answer")
+      val_raw = eval_raw
+      print("finished gsm8k eval combine data")
+      
+      """
+      # make the prompt
+      prompt = ""
+      for ex in few_shot:
+        prompt += f"Question: {ex['question'].strip()}" + f"\nAnswer: {ex['answer']}" + "\n\n"
+      prompt = prompt.strip()
+      """
+
+      # format gsm8k eval with prompt
+      # val_raw = eval_raw.map(attach_eval_prompt, batched=False, fn_kwargs={'prompt_ex': prompt})
+    
+    if args.eval_task == "comp_math":
+      math_train = load_dataset("hendrycks/competition_math", split="train", cache_dir="/gscratch/xlab/olo126/.cache", trust_remote_code=True).shuffle(seed=2)
+      
+      # grab first three of validation set to use for few-shot prompting
+      # few_shot = math_train.select(range(len(math_train) // 10, (len(math_train) // 10) + 3))
+      # eval_raw = math_train.select(range((len(math_train) // 10) + 3, len(math_train)))
+      # eval_raw = eval_raw.map(combine_data).rename_column("problem", "text")
+      eval_raw = math_train.select(range((len(math_train) // 10), len(math_train)))
+      eval_raw = eval_raw.map(combine_data).rename_column("problem", "text").remove_columns(["solution", "level", "type"])
+      val_raw = eval_raw
+      """
+      # make the prompt
+      prompt = ""
+      for ex in few_shot:
+        prompt += f"Question: {ex['problem'].strip()}" + f"\nAnswer: {ex['answer']}" + "\n\n"
+      prompt = prompt.strip()
+      """
+
+      # format gsm8k eval with prompt
+      # val_raw = eval_raw.map(attach_eval_prompt, batched=False, fn_kwargs={'prompt_ex': prompt})
+
+    print("starting encode")
+    val_dataset = val_raw.map(encode, batched=False, fn_kwargs={'tokenizer': tokenizer})
+    print("encode finished")
+    columns = deepcopy(val_dataset.column_names)
+    columns.remove("input_ids")
+    columns.remove("labels")
+    val_dataset = val_dataset.remove_columns(columns)
+    data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
+    dataloader = DataLoader(val_dataset, batch_size=1, collate_fn=data_collator)
+
 
   model_id = 0  # model_id is used to draft the random seed for the projectors
   block_size = 128  # fixed block size for the projectors
@@ -256,6 +356,10 @@ def main(args):
       if count == 1:
         print("Using Adam gradients")
       vectorized_grads = obtain_gradients_with_adam(model, batch, m, v)
+    elif args.gradient_type == "sgd":
+      if count==1:
+        print("using SGD gradients")
+      vectorized_grads = obtain_gradients(model, batch)
     """
     elif gradient_type == "sign":
       if count == 1:
@@ -298,6 +402,7 @@ def main(args):
 
 if __name__ == "__main__":
   parser = argparse.ArgumentParser()
+  parser.add_argument('--eval_task')
   parser.add_argument('--model_path')
   parser.add_argument('--info_type', default = "grads")
   parser.add_argument('--gradient_type', default = "adam")

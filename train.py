@@ -29,33 +29,49 @@ def tokenize(entry, tokenizer):
 def main(args):
   set_seed(2)
 
-  gsm8k_train = load_dataset("openai/gsm8k", "main", split="train", cache_dir="/gscratch/xlab/olo126/.cache").shuffle(seed=2)
-  gsm8k_train = gsm8k_train.map(combine_data)
-  gsm8k_train = gsm8k_train.rename_column("question", "text")
-  gsm8k_train = gsm8k_train.remove_columns("answer")
-  print("gsm8k done")
-
-  math_train = load_dataset("hendrycks/competition_math", split="train", cache_dir="/gscratch/xlab/olo126/.cache", trust_remote_code=True).shuffle(seed=2)
-  math_train = math_train.map(combine_data)
-  math_train = math_train.rename_column("problem", "text")
-  math_train = math_train.remove_columns(["solution", "level", "type"])
-  print("MATH done")
-
-  owm_train = load_dataset("open-web-math/open-web-math", split="train", cache_dir="/gscratch/xlab/olo126/.cache").shuffle(seed=2)
-  #owm_train = owm_train.filter(lambda example, idx: idx < len(owm_train) // 10, with_indices=True).remove_columns(["url", "date", "metadata"])
-  print("OpenWebMath done")
-
   tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.2-1B", padding_side="left", cache_dir="/gscratch/xlab/olo126/.cache")
-  model = AutoModelForCausalLM.from_pretrained("meta-llama/Llama-3.2-1B", cache_dir="/gscratch/xlab/olo126/.cache")
-
-  warmup_gsm8k = gsm8k_train.select(range(len(gsm8k_train) // 10))
-  warmup_math = math_train.select(range(len(math_train) // 10))
-  warmup_owm = owm_train.select(range(len(owm_train) // 1000))
-  warmup_dataset = concatenate_datasets([warmup_gsm8k, warmup_math, warmup_owm]).map(tokenize, batched=True, fn_kwargs={'tokenizer': tokenizer}).shuffle(seed=2)
-  print(warmup_dataset[0])
-
   if tokenizer.pad_token is None:
     tokenizer.add_special_tokens({"pad_token": "<pad>"})
+
+  if args.warmup:
+    gsm8k_train = load_dataset("openai/gsm8k", "main", split="train", cache_dir="/gscratch/xlab/olo126/.cache").shuffle(seed=2)
+    gsm8k_train = gsm8k_train.map(combine_data)
+    gsm8k_train = gsm8k_train.rename_column("question", "text")
+    gsm8k_train = gsm8k_train.remove_columns("answer")
+    print("gsm8k done")
+
+    math_train = load_dataset("hendrycks/competition_math", split="train", cache_dir="/gscratch/xlab/olo126/.cache", trust_remote_code=True).shuffle(seed=2)
+    math_train = math_train.map(combine_data)
+    math_train = math_train.rename_column("problem", "text")
+    math_train = math_train.remove_columns(["solution", "level", "type"])
+    print("MATH done")
+
+    owm_train = load_dataset("open-web-math/open-web-math", split="train", cache_dir="/gscratch/xlab/olo126/.cache").remove_columns(["url", "date", "metadata"]).shuffle(seed=2)
+    #owm_train = owm_train.filter(lambda example, idx: idx < len(owm_train) // 10, with_indices=True).remove_columns(["url", "date", "metadata"])
+    print("OpenWebMath done")
+
+
+    warmup_gsm8k = gsm8k_train.select(range(len(gsm8k_train) // 10))
+    warmup_math = math_train.select(range(len(math_train) // 10))
+    warmup_owm = owm_train.select(range(len(owm_train) // 1000))
+    warmup_dataset = concatenate_datasets([warmup_gsm8k, warmup_math, warmup_owm]).remove_columns(["url", "date", "metadata"]).map(tokenize, batched=True, fn_kwargs={'tokenizer': tokenizer}).shuffle(seed=2)
+    print(warmup_dataset[0])
+
+  elif args.rand_set:
+    # GRAB RANDOM SUBSET OF OWM DATASET TO PRETRAIN ON HERE
+    owm_all = load_dataset("open-web-math/open-web-math", split="train", cache_dir="/gscratch/xlab/olo126/.cache").shuffle(seed=2)
+    owm = owm_all.select(range(len(owm_all) // 1000, len(owm_all) // 1000 + len(owm_all) // 20)).shuffle(seed=2)
+    owm_sub = owm.select(range(len(owm)//20)).map(tokenize, batched=True, fn_kwargs={'tokenizer': tokenizer})
+    warmup_dataset = owm_sub
+
+  else:
+    train_files = args.dataset_file
+    if isinstance(train_files, str):
+      train_files = [train_files]
+    processed_datasets = load_dataset("json", data_files=train_files)["train"].map(tokenize, batched=True, fn_kwargs={'tokenizer': tokenizer}).shuffle(seed=2)
+    warmup_dataset = processed_datasets
+
+  model = AutoModelForCausalLM.from_pretrained("meta-llama/Llama-3.2-1B", cache_dir="/gscratch/xlab/olo126/.cache")
 
   embedding_size = model.get_input_embeddings().weight.shape[0]
   if len(tokenizer) > embedding_size:
@@ -86,11 +102,11 @@ def main(args):
   
 
   training_args = TrainingArguments(
-     output_dir='results/warmup_results',
+     output_dir=args.output_dir + f"_{args.epochs}e",
      lr_scheduler_type='linear',
      warmup_ratio=0.03,
      save_strategy='epoch',
-     num_train_epochs=4,
+     num_train_epochs=args.epochs,
      bf16=True,
      tf32=False,
      overwrite_output_dir=True,
@@ -130,6 +146,12 @@ def main(args):
 
 if __name__ == "__main__":
   parser = argparse.ArgumentParser()
+  parser.add_argument('--warmup', default = False)
+  parser.add_argument('--dataset_file')
+  parser.add_argument('--pt_percentage')
+  parser.add_argument('--output_dir')
+  parser.add_argument('--epochs', type = int, default = 4)
+  parser.add_argument('--rand_set', default = False)
   parser.add_argument('--lora', default = True)
   parser.add_argument('--lora_r', default = 128)
   parser.add_argument('--lora_a', default = 512)
