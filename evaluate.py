@@ -49,9 +49,9 @@ def remove_boxed(s):
 
 def attach_eval_prompt(entry, prompt_ex):
   if 'question' in entry.keys():
-    input_text = prompt_ex + "\n\n" + f"Question: {entry['question'].strip()}\nAnswer: "
+    input_text = prompt_ex + "\n\nFollow the format above and answer the following question in a single number.\n" + f"Question: {entry['question'].strip()}\nAnswer: "
   elif 'problem' in entry.keys():
-    input_text = prompt_ex + "\n\n" + f"Problem: {entry['problem'].strip()}\nSolution: "
+    input_text = prompt_ex + "\n\nFollow the format above and solve the following problem.\n" + f"Problem: {entry['problem'].strip()}\nSolution: "
   entry["input_text"] = input_text
   return entry
 
@@ -59,9 +59,9 @@ def create_prompt(examples):
   prompt = ""
   for ex in examples:
     if 'question' in ex.keys():
-      prompt += f"Question: {ex['question'].strip()}\nAnswer: {ex['answer'].strip}\n\n"
+      prompt += f"Question: {ex['question'].strip()}\nAnswer: {ex['answer'].strip()}\n\n"
     elif 'problem' in ex.keys():
-      prompt += f"Problem: {ex['problem'].strip()}\nSolution: {ex['solution'].strip}\n\n"
+      prompt += f"Problem: {ex['problem'].strip()}\nSolution: {ex['solution'].strip()}\n\n"
   return prompt.strip()
 
 def tokenize(entry, tokenizer):
@@ -78,14 +78,16 @@ def load_model(model_name_path, tokenizer, torch_dtype=torch.bfloat16):
   is_peft = os.path.exists(os.path.join(model_name_path, "adapter_config.json"))
   if is_peft:
     config = LoraConfig.from_pretrained(model_name_path)
-    base_model = AutoModelForCausalLM.from_pretrained(config.base_model_name_or_path, torch_dtype=torch_dtype, device_map="auto")
+    base_model = AutoModelForCausalLM.from_pretrained(config.base_model_name_or_path, torch_dtype=torch_dtype, device_map="auto", cache_dir="/gscratch/xlab/olo126/.cache")
     embedding_size = base_model.get_input_embeddings().weight.shape[0]
     if len(tokenizer) > embedding_size:
       base_model.resize_token_embeddings(len(tokenizer))
     model = PeftModel.from_pretrained(base_model, model_name_path, device_map="auto")
   else:
-    model = AutoModelForCausalLM.from_pretrained(
-       model_name_path, torch_dtype=torch_dtype, device_map="auto")
+    model = AutoModelForCausalLM.from_pretrained(model_name_path, torch_dtype=torch_dtype, device_map="auto", cache_dir="/gscratch/xlab/olo126/.cache")
+    embedding_size = model.get_input_embeddings().weight.shape[0]
+    if len(tokenizer) > embedding_size:
+      model.resize_token_embeddings(len(tokenizer))
 
   for name, param in model.named_parameters():
     if 'lora' in name or 'Lora' in name:
@@ -157,14 +159,15 @@ def main(args):
         print(trunc)
         prob = trunc.split("Question:")[1].split("Answer:")[0].strip()
         expln = trunc.split("Answer:")[1].split("####")[0].strip()
-        ans = trunc.split("####")
+        ans = trunc.split("####")[1].strip() if len(trunc.split("####")) > 1 else trunc
+        ans = ans.split("\n\n")[0].strip()
         gen_list.append({"Question": prob, "Explanation:": expln, "Answer": ans, "Correct": answers[j+i]})
         print("\nTRUNC-ED GEN\n")
         print(gen_list[-1])
         # check answer
         if answers[j+i].split("####")[1].strip() == ans:
           correct+=1
-          correct_list.append(prob + " " + expln + f" Thus, the answer is {ans}.")
+          correct_list.append(prob + " " + expln + f" #### {ans}.")
         print(correct/(len(gen_list)))
     elif args.task == 'comp_math':
       for i in range(end-j):
@@ -175,7 +178,7 @@ def main(args):
         print(trunc)
         prob = trunc.split("Problem:")[1].split("Solution:")[0].strip()
         expln = trunc.split("Solution:")[1].split("\\boxed{")[0].strip()
-        ans = trunc.split("\\boxed{")
+        ans = trunc.split("\\boxed{")[1].split("}")[0].strip()
         clean_ans = remove_boxed(last_boxed_only_string(trunc))
         gt_ans = remove_boxed(last_boxed_only_string(answers[j+1]))
         gen_list.append({"Problem": prob, "Explanation:": expln, "Solution": ans, "Correct": answers[j+i]})
@@ -199,7 +202,7 @@ if __name__ == "__main__":
   parser.add_argument('--model_path')
   parser.add_argument('--task')
   parser.add_argument('--output_dir')
-  parser.add_argument('--lora', default = True)
+  parser.add_argument('--lora', action="store_false")
   parser.add_argument('--lora_r', default = 128)
   parser.add_argument('--lora_a', default = 512)
   parser.add_argument('--lora_dropout', default = 0.1)

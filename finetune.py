@@ -29,15 +29,16 @@ def tokenize(entry, tokenizer):
 def load_model(model_name_path, tokenizer, torch_dtype=torch.bfloat16):
   is_peft = os.path.exists(os.path.join(model_name_path, "adapter_config.json"))
   if is_peft:
+    print("USING LORA")
     config = LoraConfig.from_pretrained(model_name_path)
-    base_model = AutoModelForCausalLM.from_pretrained(config.base_model_name_or_path, torch_dtype=torch_dtype, device_map="auto")
+    base_model = AutoModelForCausalLM.from_pretrained(config.base_model_name_or_path, torch_dtype=torch_dtype, device_map="auto", cache_dir="/gscratch/xlab/olo126/.cache")
     embedding_size = base_model.get_input_embeddings().weight.shape[0]
     if len(tokenizer) > embedding_size:
       base_model.resize_token_embeddings(len(tokenizer))
     model = PeftModel.from_pretrained(base_model, model_name_path, device_map="auto")
   else:
-    model = AutoModelForCausalLM.from_pretrained(
-       model_name_path, torch_dtype=torch_dtype, device_map="auto")
+    print("NOT USING LORA")
+    model = AutoModelForCausalLM.from_pretrained(model_name_path, torch_dtype=torch_dtype, device_map="auto", cache_dir="/gscratch/xlab/olo126/.cache")
 
   for name, param in model.named_parameters():
     if 'lora' in name or 'Lora' in name:
@@ -82,6 +83,7 @@ def main(args):
       model.get_output_embeddings().weight.requires_grad = False
 
   if not isinstance(model, PeftModel) and args.lora:
+    print("USING LORA")
     lora_config = LoraConfig(
       task_type=TaskType.CAUSAL_LM,
       inference_mode=False,
@@ -147,11 +149,11 @@ def main(args):
 
 if __name__ == "__main__":
   parser = argparse.ArgumentParser()
-  parser.add_argument('--warmup', default = False)
+  parser.add_argument('--warmup', action="store_true")
   parser.add_argument('--model_path')
   parser.add_argument('--output_dir')
   parser.add_argument('--task')
-  parser.add_argument('--lora', default = True)
+  parser.add_argument('--lora', action="store_false")
   parser.add_argument('--lora_r', default = 128)
   parser.add_argument('--lora_a', default = 512)
   parser.add_argument('--lora_dropout', default = 0.1)

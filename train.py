@@ -29,7 +29,7 @@ def tokenize(entry, tokenizer):
 def main(args):
   set_seed(2)
 
-  tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.2-1B", padding_side="left", cache_dir="/gscratch/xlab/olo126/.cache")
+  tokenizer = AutoTokenizer.from_pretrained(args.model_path, padding_side="left", cache_dir="/gscratch/xlab/olo126/.cache")
   if tokenizer.pad_token is None:
     tokenizer.add_special_tokens({"pad_token": "<pad>"})
 
@@ -54,14 +54,14 @@ def main(args):
     warmup_gsm8k = gsm8k_train.select(range(len(gsm8k_train) // 10))
     warmup_math = math_train.select(range(len(math_train) // 10))
     warmup_owm = owm_train.select(range(len(owm_train) // 1000))
-    warmup_dataset = concatenate_datasets([warmup_gsm8k, warmup_math, warmup_owm]).remove_columns(["url", "date", "metadata"]).map(tokenize, batched=True, fn_kwargs={'tokenizer': tokenizer}).shuffle(seed=2)
+    warmup_dataset = concatenate_datasets([warmup_gsm8k, warmup_math, warmup_owm]).map(tokenize, batched=True, fn_kwargs={'tokenizer': tokenizer}).shuffle(seed=2)
     print(warmup_dataset[0])
 
   elif args.rand_set:
     # GRAB RANDOM SUBSET OF OWM DATASET TO PRETRAIN ON HERE
     owm_all = load_dataset("open-web-math/open-web-math", split="train", cache_dir="/gscratch/xlab/olo126/.cache").shuffle(seed=2)
     owm = owm_all.select(range(len(owm_all) // 1000, len(owm_all) // 1000 + len(owm_all) // 20)).shuffle(seed=2)
-    owm_sub = owm.select(range(len(owm)//20)).map(tokenize, batched=True, fn_kwargs={'tokenizer': tokenizer})
+    owm_sub = owm.select(range(len(owm)//10)).map(tokenize, batched=True, fn_kwargs={'tokenizer': tokenizer})
     warmup_dataset = owm_sub
 
   else:
@@ -71,7 +71,7 @@ def main(args):
     processed_datasets = load_dataset("json", data_files=train_files)["train"].map(tokenize, batched=True, fn_kwargs={'tokenizer': tokenizer}).shuffle(seed=2)
     warmup_dataset = processed_datasets
 
-  model = AutoModelForCausalLM.from_pretrained("meta-llama/Llama-3.2-1B", cache_dir="/gscratch/xlab/olo126/.cache")
+  model = AutoModelForCausalLM.from_pretrained(args.model_path, cache_dir="/gscratch/xlab/olo126/.cache")
 
   embedding_size = model.get_input_embeddings().weight.shape[0]
   if len(tokenizer) > embedding_size:
@@ -81,6 +81,7 @@ def main(args):
       model.get_output_embeddings().weight.requires_grad = False
 
   if not isinstance(model, PeftModel) and args.lora:
+    print("USING LORA")
     lora_config = LoraConfig(
       task_type=TaskType.CAUSAL_LM,
       inference_mode=False,
@@ -146,13 +147,14 @@ def main(args):
 
 if __name__ == "__main__":
   parser = argparse.ArgumentParser()
-  parser.add_argument('--warmup', default = False)
+  parser.add_argument('--warmup', action="store_true")
   parser.add_argument('--dataset_file')
   parser.add_argument('--pt_percentage')
   parser.add_argument('--output_dir')
+  parser.add_argument('--model_path')
   parser.add_argument('--epochs', type = int, default = 4)
-  parser.add_argument('--rand_set', default = False)
-  parser.add_argument('--lora', default = True)
+  parser.add_argument('--rand_set', action="store_true")
+  parser.add_argument('--lora',  action="store_false")
   parser.add_argument('--lora_r', default = 128)
   parser.add_argument('--lora_a', default = 512)
   parser.add_argument('--lora_dropout', default = 0.1)

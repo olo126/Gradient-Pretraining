@@ -20,7 +20,7 @@ def parse_args():
                            default=None, help='The maximum number of samples')
     argparser.add_argument('--percentage', type=float, default=None,
                            help='The percentage of the data to be selected')
-    argparser.add_argument('--hg_dataset', type=bool, default=True,
+    argparser.add_argument('--hg_dataset', action="store_false",
                            help='Whether the train dataset is loaded from hf')
 
     args = argparser.parse_args()
